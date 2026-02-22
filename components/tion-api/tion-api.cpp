@@ -422,16 +422,49 @@ void TionApiBase::notify_state_(uint32_t request_id) {
   TionStateCall *call = nullptr;
 
   if (this->is_boost_running()) {
-    // если изменили скорость вентиляции или выключили бризер
-    if (this->state_.get_fan_speed() != this->state_.max_fan_speed) {
-      TION_LOGD(TAG, "Boost canceled by user action");
+    if (this->boost_request_state_pending_) {
+      this->boost_request_state_pending_ = false;
+      TION_LOGD(TAG, "Request state after boost activation");
+      this->request_state();
+    }
+
+    const auto max_fan_speed = this->state_.max_fan_speed;
+    const bool max_fan_speed_changed = max_fan_speed != this->boost_prev_max_fan_speed_;
+    this->boost_prev_max_fan_speed_ = max_fan_speed;
+
+    bool boost_canceled = false;
+    if (this->state_.target_temperature != this->boost_target_temperature_) {
+      TION_LOGD(TAG, "Boost canceled by user action: target temperature changed");
       // пересохраняем изменившиеся данные, для восстановления
       this->boost_save_state_();
       if (call == nullptr) {
         call = new TionStateCall(this);
       }
       this->boost_cancel_(call);  // TODO убедиться что пресет сбросится далее
-    } else {
+      boost_canceled = true;
+    } else if (this->state_.get_fan_speed() != max_fan_speed) {
+      // если изменился максимальный порог скорости - сохраняем буст и приводим скорость к новому максимуму
+      if (max_fan_speed_changed) {
+        TION_LOGD(TAG, "Boost keeps running, update fan speed to %u", max_fan_speed);
+        if (call == nullptr) {
+          call = new TionStateCall(this);
+        }
+        call->set_fan_speed(max_fan_speed);
+        // дополнительно оставим авто-режим в текущем положении
+        call->set_auto_state(this->state_.auto_state);
+      } else {
+        TION_LOGD(TAG, "Boost canceled by user action: fan speed changed");
+        // пересохраняем изменившиеся данные, для восстановления
+        this->boost_save_state_();
+        if (call == nullptr) {
+          call = new TionStateCall(this);
+        }
+        this->boost_cancel_(call);  // TODO убедиться что пресет сбросится далее
+        boost_canceled = true;
+      }
+    }
+
+    if (!boost_canceled) {
       auto time_left = this->get_boost_time_left();
       // только если натив буст не поддерживается
       if (!this->traits_.supports_boost && time_left == 0) {
@@ -551,7 +584,7 @@ void TionApiBase::boost_enable_(uint16_t boost_time, TionStateCall *call) {
     return;
   }
 
-  if (this->state_.get_fan_speed() == this->state_.max_fan_speed) {
+  if (this->state_.get_fan_speed() == this->traits_.max_fan_speed) {
     TION_LOGW(TAG, "Fan is already running at maximum speed");
     return;
   }
@@ -564,6 +597,11 @@ void TionApiBase::boost_enable_(uint16_t boost_time, TionStateCall *call) {
   TION_LOGD(TAG, "Schedule boost for %d s", boost_time);
   this->boost_save_.start_time = this->state_.work_time;
   this->boost_save_state_();
+  this->boost_target_temperature_ = this->boost_preset_().data.has_target_temperature()
+                                        ? this->boost_preset_().data.target_temperature
+                                        : this->state_.target_temperature;
+  this->boost_prev_max_fan_speed_ = this->state_.max_fan_speed;
+  this->boost_request_state_pending_ = true;
   // скорость может быть переопределена пресетом
   call->set_fan_speed(this->state_.max_fan_speed);
   this->boost_preset_().data.to_call(call);
@@ -666,6 +704,7 @@ void TionApiBase::boost_cancel_(TionStateCall *call) {
     return;
   }
   TION_LOGD(TAG, "Boost finished");
+  this->boost_request_state_pending_ = false;
   this->boost_save_.start_time = 0;
   this->boost_save_.to_call(call);
 }

@@ -345,6 +345,9 @@ class TionApiBase {
   struct : public PresetData {
     uint32_t start_time;
   } boost_save_{};
+  int8_t boost_target_temperature_{};
+  uint8_t boost_prev_max_fan_speed_{};
+  bool boost_request_state_pending_{};
 
   struct NamedPreset {
     const char *name;
